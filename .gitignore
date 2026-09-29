@@ -88,3 +88,5 @@ CMakeUserPresets.json
 
 # CLion
 cmake-build-*
+
+/verification/

@@ -176,10 +176,15 @@ namespace Gpu {
 		long long decoder_utilization = 0;
 
 		gpu_info_supported supported_functions;
+		string status, hardware_info;
 
 		// vector<proc_info> graphics_processes = {}; // TODO
 		// vector<proc_info> compute_processes = {};
 	};
+
+#ifdef __linux__
+	extern vector<gpu_info> gpus;
+#endif
 
 	namespace Nvml {
 		extern bool shutdown();
@@ -210,6 +215,10 @@ namespace Cpu {
 	extern int x, y, width, height, min_width, min_height;
 	extern bool shown, redraw, got_sensors, cpu_temp_only, has_battery, supports_watts;
 	extern string cpuName, cpuHz;
+#ifdef __linux__
+	extern bool power_is_system;
+	extern string sensor_summary;
+#endif
 	extern vector<string> available_fields;
 	extern vector<string> available_sensors;
 	extern tuple<int, float, long, string> current_bat;

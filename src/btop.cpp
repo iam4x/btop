@@ -67,6 +67,9 @@ tab-size = 4
 #include "btop_log.hpp"
 #include "btop_menu.hpp"
 #include "btop_shared.hpp"
+#ifdef __linux__
+#include "linux/apple_sensors.hpp"
+#endif
 #include "btop_theme.hpp"
 #include "btop_tools.hpp"
 
@@ -94,7 +97,7 @@ namespace Global {
 		{"#801414", "██████╔╝   ██║   ╚██████╔╝██║        ╚═╝    ╚═╝"},
 		{"#000000", "╚═════╝    ╚═╝    ╚═════╝ ╚═╝"},
 	};
-	const string Version = "1.4.7";
+	const string Version = "1.4.7-asahi.7";
 
 	int coreCount;
 	string overlay;
@@ -229,6 +232,9 @@ void clean_quit(int sig) {
 	Gpu::Nvml::shutdown();
 	Gpu::Rsmi::shutdown();
 	Gpu::Asysfs::shutdown();
+#ifdef __linux__
+	AppleSensors::shutdown_gpu();
+#endif
 	#ifdef __APPLE__
 	Gpu::AppleSilicon::shutdown();
 	#endif

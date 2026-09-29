@@ -55,6 +55,7 @@ tab-size = 4
 #include "../btop_log.hpp"
 #include "../btop_shared.hpp"
 #include "../btop_tools.hpp"
+#include "apple_sensors.hpp"
 
 #if defined(GPU_SUPPORT)
 	// Redefining C++ keywords fortunately has a warning in clang, however it's unavoidable here
@@ -149,6 +150,8 @@ namespace Cpu {
 	bool got_sensors{};
 	bool cpu_temp_only{};
 	bool supports_watts = true;
+	bool power_is_system = false;
+	string sensor_summary;
 
 	//* Populate found_sensors map
 	bool get_sensors();
@@ -375,6 +378,8 @@ namespace Shared {
 			}
 		}
 
+		AppleSensors::init();
+		Cpu::power_is_system = AppleSensors::system_watts() >= 0;
 		Cpu::collect();
 		if (Runner::coreNum_reset) Runner::coreNum_reset = false;
 		for (auto& [field, vec] : Cpu::current_cpu.cpu_percent) {
@@ -405,11 +410,15 @@ namespace Shared {
 			Gpu::Intel::init();
 		}
 
+		if (shown_gpus.contains("apple")) AppleSensors::init_gpu();
+
 		if (not Gpu::gpu_names.empty()) {
-			for (auto const& [key, _] : Gpu::gpus[0].gpu_percent)
-				Cpu::available_fields.push_back(key);
-			for (auto const& [key, _] : Gpu::shared_gpu_percent)
-				Cpu::available_fields.push_back(key);
+			if (rng::any_of(Gpu::gpus, [](const auto& gpu) { return gpu.supported_functions.gpu_utilization; })) {
+				for (auto const& [key, _] : Gpu::gpus[0].gpu_percent)
+					Cpu::available_fields.push_back(key);
+				for (auto const& [key, _] : Gpu::shared_gpu_percent)
+					Cpu::available_fields.push_back(key);
+			}
 
 			using namespace Gpu;
 			count = gpus.size();
@@ -544,14 +553,19 @@ namespace Cpu {
 						const int file_id = atoi(file.path().filename().c_str() + 4); // skip "temp" prefix
 						string file_path = file.path();
 
-						if (!file_path.contains(file_suffix) or file_path.contains("nvme")) {
+						if (not file.path().filename().string().starts_with("temp")
+						    or not file.path().filename().string().ends_with("_input") or file_path.contains("nvme")) {
 							continue;
 						}
 
 						const string basepath = file_path.erase(file_path.find(file_suffix), file_suffix.length());
 						const string label = readfile(fs::path(basepath + "label"), "temp" + to_string(file_id));
 						const string sensor_name = pname + "/" + label;
-						const int64_t temp = stol(readfile(fs::path(basepath + "input"), "0")) / 1000;
+						const auto fault = readfile(fs::path(basepath + "fault"), "0");
+						if (fault != "0") continue;
+						long long raw_temp;
+						if (not (ifstream(basepath + "input") >> raw_temp)) continue;
+						const int64_t temp = raw_temp / 1000;
 						const int64_t crit = stol(readfile(fs::path(basepath + "crit"), "95000")) / 1000;
 
 						found_sensors[sensor_name] = Sensor { fs::path(basepath + "input"), temp, crit };
@@ -605,6 +619,12 @@ namespace Cpu {
 			});
 		}
 
+		//? Apple Silicon has one SMC sensor per die area and no per-core mapping: use the hottest one
+		if (cpu_sensor.empty() and AppleSensors::has_cpu_temp()) {
+			cpu_sensor = "macsmc_hwmon/CPU Die (hottest)";
+			found_sensors[cpu_sensor] = Sensor { fs::path{}, AppleSensors::cpu_temp(), 100 };
+		}
+
 		if (cpu_sensor.empty() and not found_sensors.empty()) {
 			for (const auto& [name, sensor] : found_sensors) {
 				if (str_to_lower(name).contains("cpu") or str_to_lower(name).contains("k10temp")) {
@@ -612,13 +632,14 @@ namespace Cpu {
 					break;
 				}
 			}
-			if (cpu_sensor.empty()) {
+			if (cpu_sensor.empty() and not AppleSensors::available()) {
 				cpu_sensor = found_sensors.begin()->first;
 				Logger::warning("No good candidate for cpu sensor found, using random from all found sensors.");
 			}
 		}
 
-		return not found_sensors.empty();
+		if (found_sensors.contains(Config::getS("cpu_sensor"))) cpu_sensor = Config::getS("cpu_sensor");
+		return not cpu_sensor.empty();
 	}
 
 	static void update_sensors() {
@@ -626,7 +647,8 @@ namespace Cpu {
 
 		const auto& cpu_sensor = (not Config::getS("cpu_sensor").empty() and found_sensors.contains(Config::getS("cpu_sensor")) ? Config::getS("cpu_sensor") : Cpu::cpu_sensor);
 
-		found_sensors.at(cpu_sensor).temp = stol(readfile(found_sensors.at(cpu_sensor).path, "0")) / 1000;
+		auto& sensor = found_sensors.at(cpu_sensor);
+		sensor.temp = sensor.path.empty() ? AppleSensors::cpu_temp() : stol(readfile(sensor.path, "0")) / 1000;
 		current_cpu.temp.at(0).push_back(found_sensors.at(cpu_sensor).temp);
 		current_cpu.temp_max = found_sensors.at(cpu_sensor).crit;
 		if (current_cpu.temp.at(0).size() > 20) current_cpu.temp.at(0).pop_front();
@@ -1043,6 +1065,7 @@ namespace Cpu {
 
 	float get_cpuConsumptionWatts()
 	{
+		if (power_is_system) return AppleSensors::system_watts();
 		static long long previous_usage = 0;
 		static long long previous_timestamp = 0;
 
@@ -1240,6 +1263,8 @@ namespace Cpu {
 
 		if (Config::getB("show_cpu_watts") and supports_watts)
 			current_cpu.usage_watts = get_cpuConsumptionWatts();
+
+		if (AppleSensors::available()) sensor_summary = AppleSensors::summary();
 
 		cpu.active_cpus = std::make_optional(detect_active_cpus());
 
@@ -2222,6 +2247,8 @@ namespace Gpu {
 		Rsmi::collect<0>(gpus.data() + Nvml::device_count); // size = Rsmi::device_count
 		Asysfs::collect<0>(gpus.data() + Nvml::device_count + Rsmi::device_count); // size = Asysfs::device_count
 		Intel::collect<0>(gpus.data() + Nvml::device_count + Rsmi::device_count + Asysfs::device_count); // size = Intel::device_count
+
+		AppleSensors::collect_gpu();
 
 		//* Calculate average usage
 		long long avg = 0;

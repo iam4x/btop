@@ -575,6 +575,8 @@ namespace Cpu {
 		if (Runner::stopping) return "";
 		if (force_redraw) redraw = true;
 		bool show_temps = (Config::getB("check_temp") and got_sensors);
+		//? GPU temperatures come from the GPU driver and don't depend on a CPU sensor being found
+		const bool show_gpu_temps = Config::getB("check_temp");
 		bool show_watts = (Config::getB("show_cpu_watts") and supports_watts);
 		auto single_graph = Config::getB("cpu_single_graph");
 		bool hide_cores = show_temps and (cpu_temp_only or not Config::getB("show_coretemp"));
@@ -591,7 +593,7 @@ namespace Cpu {
 		auto graph_lo_field = Config::getS("cpu_graph_lower");
 		if (graph_lo_field == "Auto" or not v_contains(Cpu::available_fields, graph_lo_field)) {
 		#ifdef GPU_SUPPORT
-			graph_lo_field = show_gpu ? "gpu-totals" : graph_up_field;
+			graph_lo_field = show_gpu and gpus[0].supported_functions.gpu_utilization ? "gpu-totals" : graph_up_field;
 		#else
 			graph_lo_field = graph_up_field;
 		#endif
@@ -712,7 +714,7 @@ namespace Cpu {
 
 					//? GPU graphs/meters
 					auto width_left = b_width - 10 - (gpus.size() > 9 ? 2 : gpus.size() > 1 ? 1 : 0);
-					if (gpu.supported_functions.temp_info and show_temps) {
+					if (gpu.supported_functions.temp_info and show_gpu_temps) {
 						gpu_temp_graphs[i] = Draw::Graph{ gpu_graph_width, 1, "temp", gpu.temp, graph_symbol, false, false, gpu.temp_max, -23 };
 						width_left -= 11;
 					}
@@ -733,6 +735,9 @@ namespace Cpu {
 			int cpu_meter_width = b_width - (show_temps ? 23 - (b_column_size <= 1 and b_columns == 1 ? 6 : 0) : 11);
 			if (show_watts) {
 				cpu_meter_width -= 6;
+#ifdef __linux__
+				if (power_is_system) cpu_meter_width -= 4;
+#endif
 			}
 
 			cpu_meter = Draw::Meter{cpu_meter_width, "cpu"};
@@ -777,15 +782,20 @@ namespace Cpu {
 			};
 
 			const auto& [percent, watts, seconds, status] = current_bat;
+			bool show_battery_watts = Config::getB("show_battery_watts");
+#ifdef __linux__
+			//? The CPU panel already shows total system power, and the battery reports no rate while full
+			if (power_is_system) show_battery_watts = false;
+#endif
 
-			if (redraw or percent != old_percent or (watts != old_watts and Config::getB("show_battery_watts")) or seconds != old_seconds or status != old_status) {
+			if (redraw or percent != old_percent or (watts != old_watts and show_battery_watts) or seconds != old_seconds or status != old_status) {
 				old_percent = percent;
 				old_watts = watts;
 				old_seconds = seconds;
 				old_status = status;
 				const string str_time = (seconds > 0 ? sec_to_dhms(seconds, false, true) : "");
 				const string str_percent = to_string(percent) + '%';
-				const string str_watts = (watts != -1 and Config::getB("show_battery_watts") ? fmt::format("{:.2f}", watts) + 'W' : "");
+				const string str_watts = (watts != -1 and show_battery_watts ? fmt::format("{:.2f}", watts) + 'W' : "");
 				const auto& bat_symbol = bat_symbols.at((bat_symbols.contains(status) ? status : "unknown"));
 				const int current_len = (Term::width >= 100 ? 11 : 0) + str_time.size() + str_percent.size() + str_watts.size() + to_string(Config::getI("update_ms")).size();
 				const int current_pos = Term::width - current_len - 17;
@@ -887,9 +897,18 @@ namespace Cpu {
 				const auto clamped_watts = clamp(cpu.usage_watts, 0.0f, 999.0f);
 				string cwatts = fmt::format(" {:>4.{}f}", clamped_watts, clamped_watts < 9.995f ? 2 : clamped_watts < 99.95f ? 1 : 0);
 				string cwatts_post = "W";
+#ifdef __linux__
+				if (power_is_system) cwatts = " Sys" + cwatts;
+#endif
 
 				max_observed_pwr = max(max_observed_pwr, clamped_watts);
-				out += Theme::g("cached").at(clamp(clamped_watts / max_observed_pwr * 100.0f, 0.0f, 100.0f)) + cwatts + Theme::c("main_fg") + cwatts_post;
+				if (cpu.usage_watts < 0) {
+					cwatts = "  N/A";
+#ifdef __linux__
+					if (power_is_system) cwatts = " Sys" + cwatts;
+#endif
+				}
+				out += Theme::g("cached").at(clamp(clamped_watts / max(1.0f, max_observed_pwr) * 100.0f, 0.0f, 100.0f)) + cwatts + Theme::c("main_fg") + cwatts_post;
 			}
 
 				out += Theme::c("div_line") + Symbols::v_line;
@@ -1001,7 +1020,7 @@ namespace Cpu {
 				if (gpus[i].supported_functions.mem_total) {
 						out += Theme::c("inactive_fg") + '/' + Theme::c("main_fg") + ljust(floating_humanizer(gpus[i].mem_total, true), 4);
 				}
-				if (show_temps and gpus[i].supported_functions.temp_info) {
+				if (show_gpu_temps and gpus[i].supported_functions.temp_info) {
 					const auto [temp, unit] = celsius_to(gpus[i].temp.back(), temp_scale);
 					out += ' ';
 					if (b_columns > 1)
@@ -1020,6 +1039,16 @@ namespace Cpu {
 		}
 	#endif
 
+#ifdef __linux__
+		if (not sensor_summary.empty() and Config::getB("check_temp")) {
+			const auto summary = uresize(sensor_summary, max(0, width - 6));
+			const auto sensor_y = cpu_bottom ? y : y + height - 1;
+			out += Mv::to(sensor_y, x + 2) + Theme::c("cpu_box") + Symbols::h_line * (width - 4)
+				+ Mv::to(sensor_y, x + 2) + (cpu_bottom ? Symbols::title_left : Symbols::title_left_down)
+				+ Theme::c("title") + summary + Theme::c("cpu_box")
+				+ (cpu_bottom ? Symbols::title_right : Symbols::title_right_down);
+		}
+#endif
 		redraw = false;
 		return out + Fx::reset;
 	}
@@ -1110,6 +1139,10 @@ namespace Gpu {
 
 		//* General GPU info
 		int rows_used = 1;
+		if (not gpu.status.empty()) {
+			out += Mv::to(y + 1, x + 2) + Theme::c("main_fg") + uresize(gpu.status, width - b_width - 4);
+			out += Mv::to(y + 2, x + 2) + Theme::c("main_fg") + uresize(gpu.hardware_info, width - b_width - 4);
+		}
 		//? Gpu graph, meter & clock speed
 		if (gpu.supported_functions.gpu_utilization) {
 			out += Fx::ub + Mv::to(y + rows_used, x + 1) + graph_upper(safeVal(gpu.gpu_percent, "gpu-totals"s), (data_same or redraw[index]));
@@ -1128,6 +1161,12 @@ namespace Gpu {
 			}
 			out += Theme::c("div_line") + Symbols::v_line;
 			rows_used++;
+		}
+
+		if (show_temps and not gpu.supported_functions.gpu_utilization) {
+			const auto [temp, unit] = celsius_to(gpu.temp.back(), temp_scale);
+			out += Mv::to(b_y + rows_used++, b_x + 1) + Theme::c("main_fg")
+				+ "GPU temperature: " + to_string(temp) + unit;
 		}
 
 		if (gpu.supported_functions.gpu_clock) {
